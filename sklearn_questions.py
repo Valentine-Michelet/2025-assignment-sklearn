@@ -50,6 +50,7 @@ to compute distances between 2 sets of samples.
 """
 import numpy as np
 import pandas as pd
+from sklearn.utils.multiclass import check_classification_targets
 
 from sklearn.base import BaseEstimator
 from sklearn.base import ClassifierMixin
@@ -82,6 +83,12 @@ class KNearestNeighbors(ClassifierMixin, BaseEstimator):
         self : instance of KNearestNeighbors
             The current instance of the classifier
         """
+        X, y = validate_data(self, X, y)
+        check_classification_targets(y)
+
+        self.X_train_ = X
+        self.y_train_ = y
+        self.classes_ = np.unique(y)
         return self
 
     def predict(self, X):
@@ -97,8 +104,17 @@ class KNearestNeighbors(ClassifierMixin, BaseEstimator):
         y : ndarray, shape (n_test_samples,)
             Predicted class labels for each test data sample.
         """
-        y_pred = np.zeros(X.shape[0])
-        return y_pred
+        check_is_fitted(self, attributes=["X_train_", "y_train_", "classes_"])
+        X = validate_data(self, X, reset=False)
+        distances = pairwise_distances(X, self.X_train_)
+        neigh_idx = np.argsort(distances, axis=1)[:, :self.n_neighbors]
+        y_pred = np.empty(X.shape[0], dtype=self.classes_.dtype)
+
+        for i, idx in enumerate(neigh_idx):
+            labels = self.y_train_[idx]
+            values, counts = np.unique(labels, return_counts=True)
+            y_pred[i] = values[np.argmax(counts)]
+        return (y_pred)
 
     def score(self, X, y):
         """Calculate the score of the prediction.
@@ -115,7 +131,9 @@ class KNearestNeighbors(ClassifierMixin, BaseEstimator):
         score : float
             Accuracy of the model computed for the (X, y) pairs.
         """
-        return 0.
+        X, y = validate_data(self, X, y, reset=False)
+        y_pred = self.predict(X)
+        return np.mean(y_pred == y)
 
 
 class MonthlySplit(BaseCrossValidator):
@@ -133,8 +151,7 @@ class MonthlySplit(BaseCrossValidator):
         for which this column is not a datetime, it will raise a ValueError.
         To use the index as column just set `time_col` to `'index'`.
     """
-
-    def __init__(self, time_col='index'):  # noqa: D107
+    def __init__(self, time_col='index'):
         self.time_col = time_col
 
     def get_n_splits(self, X, y=None, groups=None):
@@ -155,7 +172,19 @@ class MonthlySplit(BaseCrossValidator):
         n_splits : int
             The number of splits.
         """
-        return 0
+        if self.time_col == "index":
+            dt_col = X.index
+        else:
+            dt_col = X[self.time_col]
+
+        if not pd.api.types.is_datetime64_any_dtype(dt_col):
+            raise ValueError("La colonne ou l'index"
+                             " doit être de type datetime")
+        months = dt_col.to_period("M") if isinstance(
+                                                     dt_col, pd.Index
+                                                    ) else dt_col.dt.to_period(
+                                                        "M")
+        return max(len(set(months)) - 1, 0)
 
     def split(self, X, y, groups=None):
         """Generate indices to split data into training and test set.
@@ -177,12 +206,25 @@ class MonthlySplit(BaseCrossValidator):
         idx_test : ndarray
             The testing set indices for that split.
         """
+        if self.time_col == "index":
+            dt_col = X.index
+        else:
+            dt_col = X[self.time_col]
 
-        n_samples = X.shape[0]
-        n_splits = self.get_n_splits(X, y, groups)
-        for i in range(n_splits):
-            idx_train = range(n_samples)
-            idx_test = range(n_samples)
-            yield (
-                idx_train, idx_test
-            )
+        if not pd.api.types.is_datetime64_any_dtype(dt_col):
+            raise ValueError("La colonne ou l'index "
+                             "doit être de type datetime")
+        months = dt_col.to_period("M") if isinstance(
+                                                     dt_col, pd.Index
+                                                    ) else dt_col.dt.to_period(
+                                                        "M")
+        sorted_months = sorted(set(months))
+        all_idx = np.arange(len(X))
+
+        for i in range(len(sorted_months) - 1):
+            train_idx = all_idx[months == sorted_months[i]]
+            test_idx = all_idx[months == sorted_months[i + 1]]
+            yield train_idx, test_idx
+
+    def __repr__(self):
+        return f"MonthlySplit(time_col={self.time_col!r})"
